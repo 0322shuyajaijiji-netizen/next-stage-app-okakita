@@ -3128,11 +3128,32 @@
         let selectedChapterIds = new Set();
         let isRandomMode = false;
         let score = 0;
+        let activeChapterIdx = null;
+
+        function readChapterProgress(idx) {
+            try {
+                const saved = JSON.parse(localStorage.getItem(`grammar_progress_${chapters[idx].id}`));
+                if (!saved || ![null, true, false].includes(saved.answerCorrect)) return null;
+                const questionIdx = chapters[idx].questions.findIndex(q => q.id === saved.questionId);
+                return questionIdx < 0 ? null : { questionIdx, answerCorrect: saved.answerCorrect };
+            } catch { return null; }
+        }
+
+        function saveChapterProgress(answerCorrect = null) {
+            if (activeChapterIdx === null) return;
+            try {
+                localStorage.setItem(`grammar_progress_${chapters[activeChapterIdx].id}`, JSON.stringify({
+                    questionId: activeQuestions[currentQuestionIdx].id,
+                    answerCorrect
+                }));
+            } catch { /* Keep learning available when browser storage is unavailable. */ }
+        }
 
 
         function init() { showChapterMenu(); }
 
         function showChapterMenu() {
+            activeChapterIdx = null;
             isReviewMode = false;
             isRandomMode = false;
             selectedChapterIds.clear();
@@ -3190,6 +3211,8 @@
 
         function startRandomTest() {
             if (selectedChapterIds.size === 0) return;
+            activeChapterIdx = null;
+            isReviewMode = false;
             isRandomMode = true;
             score = 0;
             
@@ -3205,18 +3228,44 @@
             renderQuestion();
         }
 
-        function startChapter(idx) {
-            currentChapterIdx = idx;
-            currentQuestionIdx = 0;
-            activeQuestions = chapters[idx].questions;
+        function startChapter(idx, resume = null) {
+            const saved = readChapterProgress(idx);
+            activeChapterIdx = null;
             isReviewMode = false;
+            isRandomMode = false;
+            if (saved && resume === null) {
+                document.getElementById('header-stats').classList.add('hidden');
+                document.getElementById('explanation-area').classList.add('hidden');
+                document.getElementById('main-container').innerHTML = `
+                    <div class="neo-card p-6 md:p-8 space-y-6">
+                        <h2 class="text-2xl font-black">${chapters[idx].title}</h2>
+                        <p class="text-lg">前回は全${chapters[idx].questions.length}問中、${saved.questionIdx + 1}問目${saved.answerCorrect === null ? 'の途中' : 'の解説'}まで進んでいます。</p>
+                        <p>どこから始めますか？</p>
+                        <div class="grid grid-cols-1 gap-4">
+                            <button type="button" id="resume-chapter-btn" class="neo-button neo-button-primary p-4 text-lg">前回の続きから</button>
+                            <button type="button" id="restart-chapter-btn" class="neo-button p-4 text-lg">最初から</button>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('resume-chapter-btn').onclick = () => startChapter(idx, true);
+                document.getElementById('restart-chapter-btn').onclick = () => startChapter(idx, false);
+                document.getElementById('resume-chapter-btn').focus();
+                return;
+            }
+            currentChapterIdx = idx;
+            activeChapterIdx = idx;
+            currentQuestionIdx = resume && saved ? saved.questionIdx : 0;
+            activeQuestions = chapters[idx].questions;
+            score = 0;
             document.getElementById('header-stats').classList.remove('hidden');
             document.getElementById('chapter-label').innerText = `Chapter ${idx + 1}`;
-            renderQuestion();
+            renderQuestion(resume && saved ? saved.answerCorrect : null);
         }
 
         function startReviewMode() {
             if (bookmarks.length === 0) return;
+            activeChapterIdx = null;
+            isRandomMode = false;
             const allQs = chapters.flatMap(c => c.questions);
             activeQuestions = bookmarks.map(id => allQs.find(q => q.id === id)).filter(Boolean);
             if (activeQuestions.length === 0) { bookmarks = []; localStorage.setItem('grammar_bookmarks', '[]'); showChapterMenu(); return; }
@@ -3226,8 +3275,8 @@
             renderQuestion();
         }
 
-        function renderQuestion() {
-            isAnswered = false;
+        function renderQuestion(answerCorrect = null) {
+            isAnswered = answerCorrect !== null;
             const q = activeQuestions[currentQuestionIdx];
             const container = document.getElementById('main-container');
             const progressText = document.getElementById('progress-text');
@@ -3245,6 +3294,8 @@
                     </div>
                 </div>
             `;
+            saveChapterProgress(answerCorrect);
+            if (isAnswered) showExplanation(answerCorrect);
         }
 
         function checkAnswer(idx) {
@@ -3254,6 +3305,7 @@
             if (isCorrect) playEffect(true);if (isCorrect) score++;else playEffect(false);
             showExplanation(isCorrect);
             isAnswered = true;
+            saveChapterProgress(isCorrect);
         }
 
         function playEffect(isCorrect) {
@@ -3345,6 +3397,12 @@
         };
 
         function showComplete() {
+            if (activeChapterIdx !== null) {
+                try {
+                    localStorage.removeItem(`grammar_progress_${chapters[activeChapterIdx].id}`);
+                } catch { /* Storage can be disabled by the browser. */ }
+                activeChapterIdx = null;
+            }
             const scoreHtml = isRandomMode ? `<p class="text-3xl font-black text-blue-600 mb-4">Score: ${score} / ${activeQuestions.length}</p>` : '';
             document.getElementById('main-container').innerHTML = `
                 <div class="neo-card p-12 text-center bg-green-50">
