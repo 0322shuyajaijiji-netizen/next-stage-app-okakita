@@ -137,6 +137,7 @@
     </div>
 
     <div id="correct-ping" class="correct-ping"></div>
+    <div id="learning-toast" role="status" aria-live="polite" aria-atomic="true" class="hidden fixed top-4 left-4 right-4 mx-auto max-w-md z-[110] neo-card p-4 bg-yellow-100 pointer-events-none"></div>
 
     <script>
         // --- AUTH CONFIG ---
@@ -3139,6 +3140,71 @@
         let isRandomMode = false;
         let score = 0;
         let activeChapterIdx = null;
+        let toastTimer = null;
+        const learningKey = 'grammar_learning_v1';
+
+        function readLearning() {
+            try {
+                const saved = JSON.parse(localStorage.getItem(learningKey));
+                return {
+                    answers: saved && saved.answers && typeof saved.answers === 'object' ? saved.answers : {},
+                    achievements: saved && saved.achievements && typeof saved.achievements === 'object' ? saved.achievements : {},
+                    changes: saved && saved.changes && typeof saved.changes === 'object' ? saved.changes : {}
+                };
+            } catch { return { answers: {}, achievements: {}, changes: {} }; }
+        }
+
+        function chapterStats(chapter, learning = readLearning()) {
+            const answered = chapter.questions.filter(q => typeof learning.answers[q.id] === 'boolean');
+            const correct = answered.filter(q => learning.answers[q.id]).length;
+            return { answered: answered.length, correct,
+                rate: answered.length ? correct / answered.length * 100 : null };
+        }
+
+        function learningSummary(chapter, learning) {
+            const stats = chapterStats(chapter, learning);
+            const delta = learning.changes[chapter.id];
+            return `<div class="mt-3 space-y-2" data-learning="${chapter.id}">
+                <p class="text-sm font-bold">学習済み：${stats.answered} / ${chapter.questions.length}問</p>
+                <div role="progressbar" aria-label="回答済みの問題数" aria-valuemin="0" aria-valuemax="${chapter.questions.length}" aria-valuenow="${stats.answered}" class="h-3 rounded-full bg-gray-200 overflow-hidden"><div class="h-full bg-blue-500" style="width:${stats.answered / chapter.questions.length * 100}%"></div></div>
+                <p class="text-sm font-bold">正答率：${stats.rate === null ? '—（未回答）' : `${Math.round(stats.rate)}%（${stats.correct}問正解 / ${stats.answered}問回答）`}</p>
+                ${Number.isFinite(delta) && delta > 0 ? `<p class="text-xs font-bold text-green-700">前回の回答から ↑ ${delta}ポイント</p>` : ''}
+            </div>`;
+        }
+
+        function showLearningToast(message, milestone = false) {
+            const toast = document.getElementById('learning-toast');
+            clearTimeout(toastTimer);
+            toast.textContent = message;
+            toast.style.backgroundColor = milestone ? '#FEF08A' : '#DCFCE7';
+            toast.classList.remove('hidden');
+            toastTimer = setTimeout(() => toast.classList.add('hidden'), milestone ? 5000 : 3500);
+        }
+
+        function recordLearning(q, isCorrect) {
+            const chapter = chapters.find(c => c.questions.some(item => item.id === q.id));
+            if (!chapter) return;
+            const learning = readLearning();
+            const before = chapterStats(chapter, learning);
+            const wasWrong = learning.answers[q.id] === false;
+            learning.answers[q.id] = isCorrect;
+            const after = chapterStats(chapter, learning);
+            learning.changes[chapter.id] = before.rate === null ? 0 : Math.round(after.rate) - Math.round(before.rate);
+            const previous = Array.isArray(learning.achievements[chapter.id]) ? learning.achievements[chapter.id] : [];
+            const achieved = new Set(previous);
+            const reached = [50, 70, 90].filter(rate => isCorrect && after.answered >= Math.min(5, chapter.questions.length) && after.rate >= rate && !achieved.has(rate));
+            reached.forEach(rate => achieved.add(rate));
+            const completed = after.answered === chapter.questions.length && !achieved.has('complete');
+            if (completed) achieved.add('complete');
+            learning.achievements[chapter.id] = [...achieved];
+            try { localStorage.setItem(learningKey, JSON.stringify(learning)); }
+            catch { showLearningToast('このブラウザでは学習記録を保存できません。保存設定をご確認ください。'); return; }
+            if (completed) showLearningToast('🎉 全問チャレンジ達成！ 最後までよく頑張りました！', true);
+            else if (reached.length) showLearningToast(`🎉 正答率${Math.max(...reached)}%達成！ 着実に力がついています！`, true);
+            else if (wasWrong && isCorrect) showLearningToast('🌟 苦手をひとつ克服！ 復習の成果が出ています。');
+            else if (before.rate !== null && after.rate > before.rate) showLearningToast('📈 前より理解が深まっています！ この調子！');
+            else if (before.answered === 0) showLearningToast('🌱 学習の第一歩！ 一問ずつ進んでいきましょう！');
+        }
 
         function readChapterProgress(idx) {
             try {
@@ -3171,10 +3237,12 @@
             document.getElementById('explanation-area').classList.add('hidden');
             const container = document.getElementById('main-container');
             const bCount = bookmarks.length;
+            const learning = readLearning();
 
             container.innerHTML = `
                 <div class="space-y-6">
                     <h2 class="text-3xl font-black">学習メニュー</h2>
+                    <p class="text-sm text-gray-600">正答率は、回答済みの各問題の最新の解答で計算します。記録はこの端末・ブラウザに保存されます。</p>
                     
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                         <div>
@@ -3200,11 +3268,12 @@
                     ${chapters.map((ch, idx) => `
                         <div class="flex items-center gap-3">
                             <input type="checkbox" onchange="toggleChapterSelection('${ch.id}')" class="w-6 h-6 border-3 border-black rounded cursor-pointer">
-                            <button onclick="startChapter(${idx})" class="neo-button flex-1 p-6 text-left flex justify-between items-center group hover:bg-blue-50">
-                                <div>
+                            <button onclick="startChapter(${idx})" class="neo-button flex-1 min-w-0 p-4 md:p-6 text-left flex justify-between items-center gap-3 group hover:bg-blue-50">
+                                <div class="min-w-0 flex-1">
                                     <p class="text-xs font-bold opacity-50 uppercase">Chapter ${idx + 1}</p>
                                     <p class="text-2xl font-black">${ch.title}</p>
                                     <p class="text-sm opacity-60">${ch.questions.length} 問収録</p>
+                                    ${learningSummary(ch, learning)}
                                 </div>
                                 <span class="text-3xl group-hover:translate-x-2 transition-transform">➡️</span>
                             </button>
@@ -3358,6 +3427,7 @@
             showExplanation(isCorrect);
             isAnswered = true;
             saveChapterProgress(isCorrect);
+            recordLearning(q, isCorrect);
         }
 
         function playEffect(isCorrect) {
